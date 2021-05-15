@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ import org.springframework.util.StringUtils;
 
 /**
  * Generic utility methods for working with SQL scripts.
+ *
  * <p>Mainly for internal use within the framework.
  *
  * @author Thomas Risberg
@@ -306,10 +307,11 @@ public abstract class ScriptUtils {
 	 * Read a script from the given resource, using "{@code --}" as the comment prefix
 	 * and "{@code ;}" as the statement separator, and build a String containing the lines.
 	 * @param resource the {@code EncodedResource} to be read
+	 * @param dataBufferFactory the factory to create data buffers with
 	 * @return {@code String} containing the script lines
 	 */
 	public static Mono<String> readScript(EncodedResource resource, DataBufferFactory dataBufferFactory) {
-		return readScript(resource, dataBufferFactory, DEFAULT_COMMENT_PREFIXES, DEFAULT_STATEMENT_SEPARATOR,
+		return readScript(resource, dataBufferFactory, DEFAULT_STATEMENT_SEPARATOR, DEFAULT_COMMENT_PREFIXES,
 				DEFAULT_BLOCK_COMMENT_END_DELIMITER);
 	}
 
@@ -321,15 +323,16 @@ public abstract class ScriptUtils {
 	 * within a statement &mdash; will be included in the results.
 	 * @param resource the {@code EncodedResource} containing the script
 	 * to be processed
+	 * @param dataBufferFactory the factory to create data buffers with
+	 * @param separator the statement separator in the SQL script (typically ";")
 	 * @param commentPrefixes the prefixes that identify comments in the SQL script
 	 * (typically "--")
-	 * @param separator the statement separator in the SQL script (typically ";")
 	 * @param blockCommentEndDelimiter the <em>end</em> block comment delimiter
 	 * @return a {@link Mono} of {@link String} containing the script lines that
 	 * completes once the resource was loaded
 	 */
 	private static Mono<String> readScript(EncodedResource resource, DataBufferFactory dataBufferFactory,
-			@Nullable String[] commentPrefixes, @Nullable String separator, @Nullable String blockCommentEndDelimiter) {
+			@Nullable String separator, @Nullable String[] commentPrefixes, @Nullable String blockCommentEndDelimiter) {
 
 		return DataBufferUtils.join(DataBufferUtils.read(resource.getResource(), dataBufferFactory, 8192))
 				.handle((it, sink) -> {
@@ -359,17 +362,18 @@ public abstract class ScriptUtils {
 	 * a statement &mdash; will be included in the results.
 	 * @param lineNumberReader the {@code LineNumberReader} containing the script
 	 * to be processed
-	 * @param lineCommentPrefix the prefix that identifies comments in the SQL script
+	 * @param commentPrefix the prefix that identifies comments in the SQL script
 	 * (typically "--")
 	 * @param separator the statement separator in the SQL script (typically ";")
 	 * @param blockCommentEndDelimiter the <em>end</em> block comment delimiter
 	 * @return a {@code String} containing the script lines
 	 * @throws IOException in case of I/O errors
 	 */
-	public static String readScript(LineNumberReader lineNumberReader, @Nullable String lineCommentPrefix,
+	public static String readScript(LineNumberReader lineNumberReader, @Nullable String commentPrefix,
 			@Nullable String separator, @Nullable String blockCommentEndDelimiter) throws IOException {
-		String[] lineCommentPrefixes = (lineCommentPrefix != null) ? new String[] { lineCommentPrefix } : null;
-		return readScript(lineNumberReader, lineCommentPrefixes, separator, blockCommentEndDelimiter);
+
+		String[] commentPrefixes = (commentPrefix != null) ? new String[] { commentPrefix } : null;
+		return readScript(lineNumberReader, commentPrefixes, separator, blockCommentEndDelimiter);
 	}
 
 	/**
@@ -381,21 +385,21 @@ public abstract class ScriptUtils {
 	 * within a statement &mdash; will be included in the results.
 	 * @param lineNumberReader the {@code LineNumberReader} containing the script
 	 * to be processed
-	 * @param lineCommentPrefixes the prefixes that identify comments in the SQL script
+	 * @param commentPrefixes the prefixes that identify comments in the SQL script
 	 * (typically "--")
 	 * @param separator the statement separator in the SQL script (typically ";")
 	 * @param blockCommentEndDelimiter the <em>end</em> block comment delimiter
 	 * @return a {@code String} containing the script lines
 	 * @throws IOException in case of I/O errors
 	 */
-	public static String readScript(LineNumberReader lineNumberReader, @Nullable String[] lineCommentPrefixes,
+	public static String readScript(LineNumberReader lineNumberReader, @Nullable String[] commentPrefixes,
 			@Nullable String separator, @Nullable String blockCommentEndDelimiter) throws IOException {
 
 		String currentStatement = lineNumberReader.readLine();
 		StringBuilder scriptBuilder = new StringBuilder();
 		while (currentStatement != null) {
 			if ((blockCommentEndDelimiter != null && currentStatement.contains(blockCommentEndDelimiter)) ||
-				(lineCommentPrefixes != null && !startsWithAny(currentStatement, lineCommentPrefixes, 0))) {
+				(commentPrefixes != null && !startsWithAny(currentStatement, commentPrefixes, 0))) {
 				if (scriptBuilder.length() > 0) {
 					scriptBuilder.append('\n');
 				}
@@ -432,12 +436,50 @@ public abstract class ScriptUtils {
 	}
 
 	/**
-	 * Does the provided SQL script contain the specified delimiter?
-	 * @param script the SQL script
-	 * @param delim the string delimiting each statement - typically a ';' character
+	 * Determine if the provided SQL script contains the specified delimiter.
+	 * <p>This method is intended to be used to find the string delimiting each
+	 * SQL statement &mdash; for example, a ';' character.
+	 * <p>Any occurrence of the delimiter within the script will be ignored if it
+	 * is within a <em>literal</em> block of text enclosed in single quotes
+	 * ({@code '}) or double quotes ({@code "}), if it is escaped with a backslash
+	 * ({@code \}), or if it is within a single-line comment or block comment.
+	 * @param script the SQL script to search within
+	 * @param delimiter the statement delimiter to search for
+	 * @see #DEFAULT_COMMENT_PREFIXES
+	 * @see #DEFAULT_BLOCK_COMMENT_START_DELIMITER
+	 * @see #DEFAULT_BLOCK_COMMENT_END_DELIMITER
 	 */
-	public static boolean containsSqlScriptDelimiters(String script, String delim) {
-		boolean inLiteral = false;
+	public static boolean containsSqlScriptDelimiters(String script, String delimiter) {
+		return containsStatementSeparator(null, script, delimiter, DEFAULT_COMMENT_PREFIXES,
+			DEFAULT_BLOCK_COMMENT_START_DELIMITER, DEFAULT_BLOCK_COMMENT_END_DELIMITER);
+	}
+
+	/**
+	 * Determine if the provided SQL script contains the specified statement separator.
+	 * <p>This method is intended to be used to find the string separating each
+	 * SQL statement &mdash; for example, a ';' character.
+	 * <p>Any occurrence of the separator within the script will be ignored if it
+	 * is within a <em>literal</em> block of text enclosed in single quotes
+	 * ({@code '}) or double quotes ({@code "}), if it is escaped with a backslash
+	 * ({@code \}), or if it is within a single-line comment or block comment.
+	 * @param resource the resource from which the script was read, or {@code null}
+	 * if unknown
+	 * @param script the SQL script to search within
+	 * @param separator the statement separator to search for
+	 * @param commentPrefixes the prefixes that identify single-line comments
+	 * (typically {@code "--"})
+	 * @param blockCommentStartDelimiter the <em>start</em> block comment delimiter
+	 * (typically {@code "/*"})
+	 * @param blockCommentEndDelimiter the <em>end</em> block comment delimiter
+	 * (typically <code>"*&#47;"</code>)
+	 * @since 5.2.16
+	 */
+	private static boolean containsStatementSeparator(@Nullable EncodedResource resource, String script,
+			String separator, String[] commentPrefixes, String blockCommentStartDelimiter,
+			String blockCommentEndDelimiter) throws ScriptException {
+
+		boolean inSingleQuote = false;
+		boolean inDoubleQuote = false;
 		boolean inEscape = false;
 
 		for (int i = 0; i < script.length(); i++) {
@@ -451,11 +493,40 @@ public abstract class ScriptUtils {
 				inEscape = true;
 				continue;
 			}
-			if (c == '\'') {
-				inLiteral = !inLiteral;
+			if (!inDoubleQuote && (c == '\'')) {
+				inSingleQuote = !inSingleQuote;
 			}
-			if (!inLiteral && script.startsWith(delim, i)) {
-				return true;
+			else if (!inSingleQuote && (c == '"')) {
+				inDoubleQuote = !inDoubleQuote;
+			}
+			if (!inSingleQuote && !inDoubleQuote) {
+				if (script.startsWith(separator, i)) {
+					return true;
+				}
+				else if (startsWithAny(script, commentPrefixes, i)) {
+					// Skip over any content from the start of the comment to the EOL
+					int indexOfNextNewline = script.indexOf('\n', i);
+					if (indexOfNextNewline > i) {
+						i = indexOfNextNewline;
+						continue;
+					}
+					else {
+						// If there's no EOL, we must be at the end of the script, so stop here.
+						break;
+					}
+				}
+				else if (script.startsWith(blockCommentStartDelimiter, i)) {
+					// Skip over any block comments
+					int indexOfCommentEnd = script.indexOf(blockCommentEndDelimiter, i);
+					if (indexOfCommentEnd > i) {
+						i = indexOfCommentEnd + blockCommentEndDelimiter.length() - 1;
+						continue;
+					}
+					else {
+						throw new ScriptParseException(
+								"Missing block comment end delimiter: " + blockCommentEndDelimiter, resource);
+					}
+				}
 			}
 		}
 
@@ -522,6 +593,7 @@ public abstract class ScriptUtils {
 	 * configured and ready to use
 	 * @param resource the resource (potentially associated with a specific encoding)
 	 * to load the SQL script from
+	 * @param dataBufferFactory the factory to create data buffers with
 	 * @param continueOnError whether or not to continue without throwing an exception
 	 * in the event of an error
 	 * @param ignoreFailedDrops whether or not to continue in the event of specifically
@@ -562,6 +634,7 @@ public abstract class ScriptUtils {
 	 * configured and ready to use
 	 * @param resource the resource (potentially associated with a specific encoding)
 	 * to load the SQL script from
+	 * @param dataBufferFactory the factory to create data buffers with
 	 * @param continueOnError whether or not to continue without throwing an exception
 	 * in the event of an error
 	 * @param ignoreFailedDrops whether or not to continue in the event of specifically
@@ -593,7 +666,7 @@ public abstract class ScriptUtils {
 
 		long startTime = System.currentTimeMillis();
 
-		Mono<String> script = readScript(resource, dataBufferFactory, commentPrefixes, separator, blockCommentEndDelimiter)
+		Mono<String> script = readScript(resource, dataBufferFactory, separator, commentPrefixes, blockCommentEndDelimiter)
 				.onErrorMap(IOException.class, ex -> new CannotReadScriptException(resource, ex));
 
 		AtomicInteger statementNumber = new AtomicInteger();

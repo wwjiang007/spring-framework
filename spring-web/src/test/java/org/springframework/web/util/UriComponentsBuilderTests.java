@@ -38,6 +38,7 @@ import org.springframework.web.testfixture.servlet.MockHttpServletRequest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link UriComponentsBuilder}.
@@ -1270,6 +1271,30 @@ class UriComponentsBuilderTests {
 	void verifyDoubleSlashReplacedWithSingleOne() {
 		String path = UriComponentsBuilder.fromPath("/home/").path("/path").build().getPath();
 		assertThat(path).isEqualTo("/home/path");
+	}
+
+	@Test
+	void validPort() {
+		UriComponents uriComponents = UriComponentsBuilder.fromUriString("http://localhost:52567/path").build();
+		assertThat(uriComponents.getPort()).isEqualTo(52567);
+		assertThat(uriComponents.getPath()).isEqualTo("/path");
+
+		uriComponents = UriComponentsBuilder.fromUriString("http://localhost:52567?trace=false").build();
+		assertThat(uriComponents.getPort()).isEqualTo(52567);
+		assertThat(uriComponents.getQuery()).isEqualTo("trace=false");
+
+		uriComponents = UriComponentsBuilder.fromUriString("http://localhost:52567#fragment").build();
+		assertThat(uriComponents.getPort()).isEqualTo(52567);
+		assertThat(uriComponents.getFragment()).isEqualTo("fragment");
+	}
+
+	@Test
+	void verifyInvalidPort() {
+		String url = "http://localhost:port/path";
+		assertThatThrownBy(() -> UriComponentsBuilder.fromUriString(url).build().toUri())
+				.isInstanceOf(NumberFormatException.class);
+		assertThatThrownBy(() -> UriComponentsBuilder.fromHttpUrl(url).build().toUri())
+				.isInstanceOf(NumberFormatException.class);
 	}
 
 }

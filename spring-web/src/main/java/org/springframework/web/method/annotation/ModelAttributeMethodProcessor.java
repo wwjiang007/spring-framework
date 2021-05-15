@@ -17,6 +17,7 @@
 package org.springframework.web.method.annotation;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ import org.springframework.beans.TypeMismatchException;
 import org.springframework.core.MethodParameter;
 import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.validation.BindException;
 import org.springframework.validation.BindingResult;
@@ -75,6 +77,7 @@ import org.springframework.web.multipart.support.StandardServletPartUtils;
  * @author Rossen Stoyanchev
  * @author Juergen Hoeller
  * @author Sebastien Deleuze
+ * @author Vladislav Kisel
  * @since 3.1
  */
 public class ModelAttributeMethodProcessor implements HandlerMethodArgumentResolver, HandlerMethodReturnValueHandler {
@@ -255,6 +258,14 @@ public class ModelAttributeMethodProcessor implements HandlerMethodArgumentResol
 			String paramName = paramNames[i];
 			Class<?> paramType = paramTypes[i];
 			Object value = webRequest.getParameterValues(paramName);
+
+			// Since WebRequest#getParameter exposes a single-value parameter as an array
+			// with a single element, we unwrap the single value in such cases, analogous
+			// to WebExchangeDataBinder.addBindValue(Map<String, Object>, String, List<?>).
+			if (ObjectUtils.isArray(value) && Array.getLength(value) == 1) {
+				value = Array.get(value, 0);
+			}
+
 			if (value == null) {
 				if (fieldDefaultPrefix != null) {
 					value = webRequest.getParameter(fieldDefaultPrefix + paramName);
@@ -268,6 +279,7 @@ public class ModelAttributeMethodProcessor implements HandlerMethodArgumentResol
 					}
 				}
 			}
+
 			try {
 				MethodParameter methodParam = new FieldAwareConstructorParameter(ctor, i, paramName);
 				if (value == null && methodParam.isOptional()) {
